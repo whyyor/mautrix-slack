@@ -43,6 +43,8 @@ type MessageConverter struct {
 
 	ServerName  string
 	MaxFileSize int
+	// DirectMedia makes files links that are downloaded from Slack when opened, instead of copying them right away.
+	DirectMedia bool
 }
 
 type contextKey int
