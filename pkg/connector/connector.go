@@ -47,6 +47,7 @@ func (s *SlackConnector) Init(bridge *bridgev2.Bridge) {
 	s.br = bridge
 	s.DB = slackdb.New(bridge.DB.Database, bridge.Log.With().Str("db_section", "slack").Logger())
 	s.MsgConv = msgconv.New(bridge, s.DB)
+	s.MsgConv.DirectMedia = s.directMedia
 	bridge.Config.PersonalFilteringSpaces = false
 }
 
@@ -56,6 +57,9 @@ func (s *SlackConnector) SetMaxFileSize(maxSize int64) {
 
 func (s *SlackConnector) SetUseDirectMedia() {
 	s.directMedia = true
+	if s.MsgConv != nil {
+		s.MsgConv.DirectMedia = true
+	}
 }
 
 func (s *SlackConnector) Start(ctx context.Context) error {

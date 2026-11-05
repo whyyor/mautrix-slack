@@ -17,13 +17,20 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 
+	"github.com/slack-go/slack"
+
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/mediaproxy"
+
+	"go.mau.fi/mautrix-slack/pkg/slackid"
 )
 
 type MediaIDType byte
@@ -32,7 +39,7 @@ const (
 	MediaIDTypeEmoji MediaIDType = 1
 )
 
-func (s *SlackConnector) Download(_ context.Context, mediaID networkid.MediaID, _ map[string]string) (mediaproxy.GetMediaResponse, error) {
+func (s *SlackConnector) Download(ctx context.Context, mediaID networkid.MediaID, _ map[string]string) (mediaproxy.GetMediaResponse, error) {
 	rawParsedID, err := ParseMediaID(mediaID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse media ID: %w", err)
@@ -42,6 +49,8 @@ func (s *SlackConnector) Download(_ context.Context, mediaID networkid.MediaID, 
 		return &mediaproxy.GetMediaResponseURL{
 			URL: parsedID.URL(),
 		}, nil
+	case *DirectMediaFile:
+		return s.downloadFile(ctx, parsedID)
 	default:
 		return nil, fmt.Errorf("unknown media ID type: %T", parsedID)
 	}
@@ -72,6 +81,16 @@ func ParseMediaID(mediaID networkid.MediaID) (any, error) {
 			EmojiID:  emojiID,
 			FileName: fileName,
 		}, nil
+	case slackid.MediaIDTypeFile:
+		teamID, mediaID, err := readShortString(mediaID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read team ID: %w", err)
+		}
+		fileID, _, err := readShortString(mediaID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read file ID: %w", err)
+		}
+		return &DirectMediaFile{TeamID: teamID, FileID: fileID}, nil
 	default:
 		return nil, fmt.Errorf("unknown media ID type: %d", mediaIDType)
 	}
@@ -140,4 +159,68 @@ func readShortString(input []byte) (value string, remaining []byte, err error) {
 	value = string(input[1 : 1+length])
 	remaining = input[1+length:]
 	return
+}
+
+// DirectMediaFile is a file still on Slack, downloaded with the user's login when it's opened.
+type DirectMediaFile struct {
+	TeamID string
+	FileID string
+}
+
+func (s *SlackConnector) downloadFile(ctx context.Context, dmf *DirectMediaFile) (mediaproxy.GetMediaResponse, error) {
+	client := s.clientForTeam(dmf.TeamID)
+	if client == nil {
+		return nil, fmt.Errorf("not logged in to Slack team %s", dmf.TeamID)
+	}
+	// Download URLs can change, so ask Slack for the current one.
+	file, _, _, err := client.GetFileInfoContext(ctx, dmf.FileID, 0, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file info: %w", err)
+	}
+	url := file.URLPrivateDownload
+	if url == "" {
+		url = file.URLPrivate
+	}
+	if url == "" {
+		return nil, fmt.Errorf("file %s has no download URL", dmf.FileID)
+	}
+	return &mediaproxy.GetMediaResponseCallback{
+		Callback: func(w io.Writer) (int64, error) {
+			cw := &htmlCheckingWriter{w: w}
+			err := client.GetFileContext(ctx, url, cw)
+			return cw.n, err
+		},
+		ContentType:   file.Mimetype,
+		ContentLength: int64(file.Size),
+	}, nil
+}
+
+// clientForTeam finds a logged-in Slack client for the team a file belongs to.
+func (s *SlackConnector) clientForTeam(teamID string) *slack.Client {
+	for _, login := range s.br.GetAllCachedUserLogins() {
+		if loginTeam, _ := slackid.ParseUserLoginID(login.ID); loginTeam != teamID {
+			continue
+		}
+		if sc, ok := login.Client.(*SlackClient); ok && sc.Client != nil {
+			return sc.Client
+		}
+	}
+	return nil
+}
+
+var errHTMLDownload = errors.New("slack sent an HTML page instead of the file (expired login?)")
+
+// htmlCheckingWriter counts bytes and refuses an HTML page, which Slack sends instead of the file when auth fails.
+type htmlCheckingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (hw *htmlCheckingWriter) Write(p []byte) (int, error) {
+	if hw.n == 0 && bytes.HasPrefix(bytes.TrimSpace(bytes.ToLower(p)), []byte("<!doctype html")) {
+		return 0, errHTMLDownload
+	}
+	n, err := hw.w.Write(p)
+	hw.n += int64(n)
+	return n, err
 }

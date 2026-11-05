@@ -272,6 +272,18 @@ func (mc *MessageConverter) slackFileToMatrix(ctx context.Context, portal *bridg
 	convertAudio := file.SubType == "slack_audio" && ffmpeg.Supported()
 	needsMediaSize := content.Info.Width == 0 && content.Info.Height == 0 && strings.HasPrefix(content.Info.MimeType, "image/")
 	requireFile := convertAudio || needsMediaSize || content.Info.MimeType == ""
+	// Files that don't need converting or measuring can stay on Slack until someone opens them.
+	if mc.DirectMedia && url != "" && !requireFile {
+		teamID, _ := slackid.ParsePortalID(portal.ID)
+		if mediaID := slackid.MakeFileMediaID(teamID, file.ID); mediaID != nil {
+			uri, err := mc.Bridge.Matrix.GenerateContentURI(ctx, mediaID)
+			if err == nil {
+				content.URL = uri
+				return &bridgev2.ConvertedMessagePart{ID: partID, Type: event.EventMessage, Content: &content}
+			}
+			log.Warn().Err(err).Msg("Failed to make direct media link, copying the file instead")
+		}
+	}
 	var retErr *bridgev2.ConvertedMessagePart
 	reuploadFunc := func(dest io.Writer) (res *bridgev2.FileStreamResult, err error) {
 		res = &bridgev2.FileStreamResult{

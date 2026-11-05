@@ -18,12 +18,29 @@ package slackid
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
+
+// MediaIDTypeFile marks a direct media ID that points at a Slack file (custom emoji use type 1).
+const MediaIDTypeFile = 2
+
+// MakeFileMediaID makes a direct media ID for a file, so it's only downloaded from Slack when someone opens it.
+func MakeFileMediaID(teamID, fileID string) networkid.MediaID {
+	if teamID == "" || fileID == "" || len(teamID) > 255 || len(fileID) > 255 {
+		return nil
+	}
+	return slices.Concat(
+		[]byte{MediaIDTypeFile, byte(len(teamID))},
+		[]byte(teamID),
+		[]byte{byte(len(fileID))},
+		[]byte(fileID),
+	)
+}
 
 func MakeMessageID(teamID, channelID, timestamp string) networkid.MessageID {
 	return networkid.MessageID(fmt.Sprintf("%s-%s-%s", teamID, channelID, timestamp))
